@@ -275,3 +275,14 @@ The rear-camera HTML component is embedded directly in `app.py` and materialized
 into `/tmp` at runtime. This removes the deployment dependency on a
 `rear_camera_component` GitHub directory and prevents Streamlit Cloud
 "No such component directory" startup failures.
+
+
+## v24 — Home collection dashboard
+
+- Home is now the default landing page.
+- Headline KPIs: unique sets, total physical cards, estimated collection value,
+  and valuation coverage.
+- Secondary KPIs: unique cards, duplicates, graded cards, and rookie cards.
+- Most Valuable prefers the collector's own uploaded photo over web/reference art.
+- Set Progress and Recently Added are surfaced on the home screen.
+- Home uses cached/manual values only and does not call the market API on page load.

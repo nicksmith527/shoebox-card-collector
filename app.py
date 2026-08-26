@@ -90,6 +90,7 @@ from external_catalog import (
 )
 
 from database import (
+    get_home_dashboard_data,
     get_primary_user_images_for_set,
     get_card_values_for_set,
     save_card_value_estimates,
@@ -157,14 +158,107 @@ def valuation_map(rows):
     return out
 
 
-nav = st.sidebar.radio("Shoebox Card Collector", ["Set Builder", "My Collection", "Add / Scan Card", "Master Export"])
+nav = st.sidebar.radio("Shoebox Card Collector", ["Home", "Set Builder", "My Collection", "Add / Scan Card", "Master Export"])
 
 sets = get_master_sets()
 if not sets:
     st.error("No master sets are loaded yet.")
     st.stop()
 
-if nav == "Set Builder":
+if nav == "Home":
+    st.title("The Shoebox Collection")
+    st.caption("Your collection at a glance.")
+
+    try:
+        home = get_home_dashboard_data()
+    except Exception as error:
+        st.error(f"Could not load collection dashboard: {error}")
+        home = None
+
+    if home is not None:
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Unique Sets", f"{home['unique_sets']:,}")
+        k2.metric("Total Cards", f"{home['total_cards']:,}")
+        k3.metric("Estimated Value", f"${home['estimated_value']:,.0f}")
+        k4.metric("Valuation Coverage", f"{home['valuation_coverage']:.0%}")
+
+        if home["total_cards"]:
+            st.progress(
+                min(home["valuation_coverage"], 1.0),
+                text=(
+                    f"{home['valued_cards']:,} of {home['total_cards']:,} physical cards "
+                    "have a cached/manual value"
+                ),
+            )
+        st.caption(
+            "Estimated value uses saved manual values first, then cached market estimates. "
+            "Opening Home does not make market-API calls."
+        )
+
+        if st.button("📷 Add / Scan Card", type="primary", width="stretch"):
+            st.session_state["_home_go_scan"] = True
+            st.rerun()
+
+        # Streamlit radio navigation cannot be changed after widget creation in the
+        # same run, so surface a strong CTA and keep sidebar navigation available.
+        if st.session_state.pop("_home_go_scan", False):
+            st.info("Choose **Add / Scan Card** in the sidebar to scan your next card.")
+
+        st.markdown("### Collection")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Unique Cards", f"{home['unique_cards']:,}")
+        c2.metric("Duplicates", f"{home['duplicate_copies']:,}")
+        c3.metric("Graded", f"{home['graded_cards']:,}")
+        c4.metric("Rookies", f"{home['rookie_cards']:,}")
+
+        if home["top_cards"]:
+            st.markdown("### Most Valuable")
+            top_cols = st.columns(min(3, len(home["top_cards"])))
+            for idx, card in enumerate(home["top_cards"][:3]):
+                with top_cols[idx]:
+                    image = card.get("user_image_url") or card.get("reference_image_url")
+                    if image:
+                        st.image(image, width="stretch")
+                    st.markdown(
+                        f"**{card.get('player_name') or 'Unknown'} "
+                        f"#{card.get('card_number') or ''}**"
+                    )
+                    set_bits = [
+                        card.get("year"),
+                        card.get("manufacturer"),
+                        card.get("set_name"),
+                    ]
+                    st.caption(" ".join(str(x) for x in set_bits if x))
+                    st.metric("Est. value", f"${float(card['value']):,.2f}")
+
+        if home["set_progress"]:
+            st.markdown("### Set Progress")
+            for item in home["set_progress"][:5]:
+                pct = min(max(float(item["pct"]), 0.0), 1.0)
+                label = item["label"] or "Unnamed set"
+                total = item["total_cards"]
+                if total:
+                    st.progress(
+                        pct,
+                        text=f"{label} — {item['owned_unique']:,}/{total:,} ({pct:.0%})",
+                    )
+                else:
+                    st.write(f"**{label}** — {item['owned_unique']:,} unique cards owned")
+
+        if home["recent"]:
+            st.markdown("### Recently Added")
+            recent_cols = st.columns(min(4, len(home["recent"])))
+            for idx, card in enumerate(home["recent"][:4]):
+                with recent_cols[idx]:
+                    image = card.get("user_image_url") or card.get("reference_image_url")
+                    if image:
+                        st.image(image, width="stretch")
+                    st.caption(
+                        f"{card.get('player_name') or 'Unknown'} "
+                        f"#{card.get('card_number') or ''}"
+                    )
+
+elif nav == "Set Builder":
     st.title("Set Builder")
     st.caption("Browse a master checklist, quickly mark what you own, and track unlimited duplicate copies.")
 

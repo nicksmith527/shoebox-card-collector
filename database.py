@@ -573,3 +573,225 @@ def get_primary_user_images_for_set(master_set_id):
             result[master_card_id] = img.get("image_url")
 
     return result
+
+
+def get_home_dashboard_data():
+    """
+    Collection-level KPI data using cached Shoebox data only.
+    No market API calls are made here.
+    """
+    sb = get_supabase()
+
+    copies = _execute_with_retry(
+        sb.table("collection_copies")
+        .select("id,master_card_id,condition_label,grading_company,grade,manual_value,created_at")
+        .order("created_at", desc=True)
+    ).data or []
+
+    if not copies:
+        return {
+            "total_cards": 0,
+            "unique_cards": 0,
+            "duplicate_copies": 0,
+            "unique_sets": 0,
+            "estimated_value": 0.0,
+            "valued_cards": 0,
+            "valuation_coverage": 0.0,
+            "graded_cards": 0,
+            "rookie_cards": 0,
+            "recent": [],
+            "top_cards": [],
+            "set_progress": [],
+        }
+
+    master_ids = sorted({int(r["master_card_id"]) for r in copies})
+    cards = _execute_with_retry(
+        sb.table("master_cards")
+        .select("id,master_set_id,card_number,player_name,card_title,rookie,reference_image_url")
+        .in_("id", master_ids)
+    ).data or []
+    card_by_id = {int(c["id"]): c for c in cards}
+
+    set_ids = sorted({int(c["master_set_id"]) for c in cards if c.get("master_set_id") is not None})
+    sets = []
+    if set_ids:
+        sets = _execute_with_retry(
+            sb.table("master_sets")
+            .select("id,sport,year,manufacturer,set_name,total_cards")
+            .in_("id", set_ids)
+        ).data or []
+    set_by_id = {int(s["id"]): s for s in sets}
+
+    value_rows = []
+    if master_ids:
+        value_rows = _execute_with_retry(
+            sb.table("card_values")
+            .select("master_card_id,condition_label,grading_company,grade,estimated_value,as_of_date,created_at")
+            .in_("master_card_id", master_ids)
+        ).data or []
+
+    values_by_card = {}
+    for v in value_rows:
+        values_by_card.setdefault(int(v["master_card_id"]), []).append(v)
+
+    # User-photo lookup across owned copies.
+    copy_ids = [int(r["id"]) for r in copies]
+    user_image_by_copy = {}
+    if copy_ids:
+        try:
+            images = _execute_with_retry(
+                sb.table("card_images")
+                .select("collection_copy_id,image_type,image_url,is_primary,created_at")
+                .in_("collection_copy_id", copy_ids)
+                .order("created_at", desc=True)
+            ).data or []
+            for img in images:
+                cid = int(img["collection_copy_id"])
+                if cid not in user_image_by_copy and (
+                    img.get("image_type") == "front" or img.get("is_primary")
+                ):
+                    user_image_by_copy[cid] = img.get("image_url")
+        except Exception:
+            user_image_by_copy = {}
+
+    def _norm(x):
+        return str(x or "").strip().upper()
+
+    def _best_cached_value(copy_row):
+        manual = copy_row.get("manual_value")
+        if manual not in (None, ""):
+            try:
+                return float(manual), "manual"
+            except Exception:
+                pass
+
+        candidates = values_by_card.get(int(copy_row["master_card_id"]), [])
+        if not candidates:
+            return None, None
+
+        grader = _norm(copy_row.get("grading_company"))
+        grade = copy_row.get("grade")
+        condition = _norm(copy_row.get("condition_label"))
+
+        def score(v):
+            s = 0
+            vg = _norm(v.get("grading_company"))
+            vc = _norm(v.get("condition_label"))
+            vgrade = v.get("grade")
+
+            if grader and grader != "RAW":
+                if vg == grader:
+                    s += 50
+                try:
+                    if grade is not None and vgrade is not None and float(grade) == float(vgrade):
+                        s += 60
+                except Exception:
+                    pass
+            else:
+                if vg in ("", "RAW"):
+                    s += 30
+                if condition and vc == condition:
+                    s += 60
+                elif vc == "RAW":
+                    s += 20
+
+            if v.get("estimated_value") not in (None, ""):
+                s += 5
+            return s
+
+        ranked = sorted(candidates, key=score, reverse=True)
+        best = ranked[0] if ranked else None
+        if not best or best.get("estimated_value") in (None, ""):
+            return None, None
+        try:
+            return float(best["estimated_value"]), "cached"
+        except Exception:
+            return None, None
+
+    total_value = 0.0
+    valued_cards = 0
+    graded_cards = 0
+    rookie_cards = 0
+    copy_details = []
+    unique_master_ids = set()
+
+    for cp in copies:
+        mid = int(cp["master_card_id"])
+        card = card_by_id.get(mid, {})
+        unique_master_ids.add(mid)
+        if _norm(cp.get("grading_company")) not in ("", "RAW"):
+            graded_cards += 1
+        if card.get("rookie"):
+            rookie_cards += 1
+
+        value, source = _best_cached_value(cp)
+        if value is not None:
+            total_value += value
+            valued_cards += 1
+
+        sid = int(card["master_set_id"]) if card.get("master_set_id") is not None else None
+        set_row = set_by_id.get(sid, {}) if sid is not None else {}
+        copy_details.append({
+            "copy_id": int(cp["id"]),
+            "master_card_id": mid,
+            "master_set_id": sid,
+            "player_name": card.get("player_name") or card.get("card_title") or "Unknown",
+            "card_number": card.get("card_number"),
+            "rookie": bool(card.get("rookie")),
+            "reference_image_url": card.get("reference_image_url"),
+            "user_image_url": user_image_by_copy.get(int(cp["id"])),
+            "value": value,
+            "value_source": source,
+            "created_at": cp.get("created_at"),
+            "year": set_row.get("year"),
+            "manufacturer": set_row.get("manufacturer"),
+            "set_name": set_row.get("set_name"),
+        })
+
+    # Set progress based on unique owned cards.
+    owned_by_set = {}
+    for mid in unique_master_ids:
+        card = card_by_id.get(mid, {})
+        sid = card.get("master_set_id")
+        if sid is not None:
+            owned_by_set.setdefault(int(sid), set()).add(mid)
+
+    set_progress = []
+    for sid, owned in owned_by_set.items():
+        s = set_by_id.get(sid, {})
+        total = int(s.get("total_cards") or 0)
+        set_progress.append({
+            "master_set_id": sid,
+            "label": " ".join(
+                str(x) for x in [s.get("year"), s.get("manufacturer"), s.get("set_name")] if x
+            ),
+            "owned_unique": len(owned),
+            "total_cards": total,
+            "pct": (len(owned) / total) if total else 0.0,
+        })
+    set_progress.sort(key=lambda x: (x["pct"], x["owned_unique"]), reverse=True)
+
+    top_cards = [r for r in copy_details if r["value"] is not None]
+    top_cards.sort(key=lambda x: x["value"], reverse=True)
+
+    recent = sorted(
+        copy_details,
+        key=lambda x: str(x.get("created_at") or ""),
+        reverse=True,
+    )
+
+    total_cards = len(copies)
+    return {
+        "total_cards": total_cards,
+        "unique_cards": len(unique_master_ids),
+        "duplicate_copies": max(total_cards - len(unique_master_ids), 0),
+        "unique_sets": len(owned_by_set),
+        "estimated_value": round(total_value, 2),
+        "valued_cards": valued_cards,
+        "valuation_coverage": (valued_cards / total_cards) if total_cards else 0.0,
+        "graded_cards": graded_cards,
+        "rookie_cards": rookie_cards,
+        "recent": recent[:8],
+        "top_cards": top_cards[:6],
+        "set_progress": set_progress[:8],
+    }
