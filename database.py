@@ -516,3 +516,50 @@ def get_latest_value_date(master_card_id):
         or []
     )
     return rows[0].get("as_of_date") if rows else None
+
+
+def get_primary_user_images_for_set(master_set_id):
+    """
+    Return {master_card_id: image_url} using the user's uploaded front photo.
+    If multiple copies/photos exist, the newest primary/front image wins.
+    """
+    sb = get_supabase()
+    cards = get_master_cards(master_set_id)
+    card_ids = [int(c["id"]) for c in cards]
+    if not card_ids:
+        return {}
+
+    copies_q = (
+        sb.table("collection_copies")
+        .select("id,master_card_id")
+        .in_("master_card_id", card_ids)
+    )
+    copies = _execute_with_retry(copies_q).data or []
+    if not copies:
+        return {}
+
+    copy_to_card = {
+        int(row["id"]): int(row["master_card_id"])
+        for row in copies
+    }
+    copy_ids = list(copy_to_card.keys())
+
+    images_q = (
+        sb.table("card_images")
+        .select("id,collection_copy_id,image_type,image_url,is_primary,created_at")
+        .in_("collection_copy_id", copy_ids)
+        .order("created_at", desc=True)
+    )
+    images = _execute_with_retry(images_q).data or []
+
+    result = {}
+    for img in images:
+        copy_id = int(img["collection_copy_id"])
+        master_card_id = copy_to_card.get(copy_id)
+        if master_card_id is None or master_card_id in result:
+            continue
+        # Prefer front/primary user images.
+        if img.get("image_type") == "front" or img.get("is_primary"):
+            result[master_card_id] = img.get("image_url")
+
+    return result

@@ -219,3 +219,15 @@ The Add / Scan Card page is now phone-first:
 - Mobile CSS improves tap targets and spacing
 
 The AI result is a suggestion, not a definitive card identification.
+
+
+## v17 — Photo-first collection images
+
+- Streamlit upgraded to 1.62+.
+- Native camera capture requests 1080p.
+- Original capture bytes are uploaded to Supabase Storage without resizing.
+- User-uploaded/captured front photos are preferred over catalog/reference images.
+- Reference images remain fallback-only.
+- Native `st.camera_input` does not currently expose a front/rear-facing camera
+  parameter; forcing the iPhone rear camera would require a custom browser
+  camera component using `facingMode: environment`.
