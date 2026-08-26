@@ -267,3 +267,11 @@ This package consolidates the recent deployment fixes into one upload:
 - v21: market valuation database fix so graded rows receive non-null condition labels such as `PSA 9`
 
 Upload the contents while preserving the `rear_camera_component` folder.
+
+
+## v23 — self-contained camera component
+
+The rear-camera HTML component is embedded directly in `app.py` and materialized
+into `/tmp` at runtime. This removes the deployment dependency on a
+`rear_camera_component` GitHub directory and prevents Streamlit Cloud
+"No such component directory" startup failures.
