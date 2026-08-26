@@ -1,9 +1,12 @@
 import os
+import base64
 import io
+from pathlib import Path
 from datetime import date, timedelta
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from market_values import estimate_card_values, test_market_access
 from photo_identification import identify_card_photo
 
@@ -21,6 +24,50 @@ try:
 except Exception:
     pass
 
+
+_rear_camera = components.declare_component(
+    "shoebox_rear_camera",
+    path=str(Path(__file__).parent / "rear_camera_component"),
+)
+
+class CapturedCardImage(io.BytesIO):
+    def __init__(
+        self,
+        raw: bytes,
+        mime_type="image/jpeg",
+        name="card_capture.jpg",
+        ai_bytes: bytes | None = None,
+    ):
+        super().__init__(raw)
+        self.type = mime_type
+        self.name = name
+        self.ai_bytes = ai_bytes
+
+    def getvalue(self):
+        return super().getvalue()
+
+def rear_camera_capture(key="rear_camera"):
+    value = _rear_camera(key=key, default=None)
+    if not value or not value.get("original_data_url"):
+        return None, value
+    try:
+        _, original_encoded = value["original_data_url"].split(",", 1)
+        raw = base64.b64decode(original_encoded)
+
+        ai_bytes = None
+        if value.get("ai_data_url"):
+            _, ai_encoded = value["ai_data_url"].split(",", 1)
+            ai_bytes = base64.b64decode(ai_encoded)
+
+        return CapturedCardImage(
+            raw,
+            mime_type=value.get("mime_type") or "image/jpeg",
+            name=value.get("filename") or "card_photo.jpg",
+            ai_bytes=ai_bytes,
+        ), value
+    except Exception:
+        return None, value
+
 from external_catalog import (
     parse_card_query,
     search_external_card_catalog,
@@ -32,6 +79,7 @@ from external_catalog import (
 )
 
 from database import (
+    get_primary_user_images_for_set,
     get_card_values_for_set,
     save_card_value_estimates,
     upsert_master_cards_from_external,
@@ -631,20 +679,34 @@ elif nav == "Add / Scan Card":
     st.markdown(
         '<div class="scan-hero"><b>📷 Quick Scan</b><br>'
         '<span class="small-muted">Photograph the front of one card. '
-        'Keep the card straight and fill most of the frame.</span></div>',
+        'Rear camera opens first. Keep the card straight and fill most of the frame. Your original capture becomes the primary collection photo.</span></div>',
         unsafe_allow_html=True,
     )
 
-    camera = st.camera_input("Take card photo", key="mobile_camera")
+    st.caption("Uses your phone’s native rear camera for the highest-quality original.")
+    rear_capture, rear_meta = rear_camera_capture(key="mobile_rear_camera")
 
-    with st.expander("Upload an existing photo instead", expanded=False):
+    with st.expander("Camera fallback / upload existing photo", expanded=False):
+        native_camera = st.camera_input(
+            "Use Streamlit camera",
+            key="mobile_camera_fallback",
+        )
         upload = st.file_uploader(
-            "Choose card image",
+            "Or choose card image",
             type=["jpg", "jpeg", "png", "webp"],
             key="mobile_upload",
         )
 
-    image = camera or upload
+    image = rear_capture or native_camera or upload
+
+    if rear_meta and rear_capture:
+        size_mb = float(rear_meta.get("original_size") or 0) / 1024 / 1024
+        st.caption(
+            f"Original: {rear_meta.get('original_width', '?')}×"
+            f"{rear_meta.get('original_height', '?')} • {size_mb:.1f} MB. "
+            f"AI copy: {rear_meta.get('ai_width', '?')}×"
+            f"{rear_meta.get('ai_height', '?')}."
+        )
 
     if image is not None:
         st.image(image, width=280)
@@ -752,6 +814,7 @@ elif nav == "Add / Scan Card":
 
             if match.get("reference_image_url"):
                 st.image(match["reference_image_url"], width=180)
+                st.caption("Reference only — your captured image will be primary.")
 
             c1, c2 = st.columns(2)
             condition = c1.selectbox(

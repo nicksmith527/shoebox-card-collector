@@ -422,15 +422,25 @@ def save_card_value_estimates(master_card_id, estimates):
 
     rows = []
     for item in estimates:
+        grading_company = item.get("grading_company") or "RAW"
+        grade = item.get("grade")
+
+        condition_label = item.get("condition_label")
+        if not condition_label:
+            if grading_company and grading_company != "RAW" and grade is not None:
+                try:
+                    condition_label = f"{grading_company} {float(grade):g}"
+                except Exception:
+                    condition_label = f"{grading_company} {grade}"
+            else:
+                condition_label = "RAW"
+
         rows.append({
             "master_card_id": master_card_id,
             "value_basis": item.get("value_basis"),
-            "condition_label": item.get("condition_label"),
-            "grading_company": (
-                item.get("grading_company")
-                or ("RAW" if item.get("condition_label") else "RAW")
-            ),
-            "grade": item.get("grade"),
+            "condition_label": condition_label,
+            "grading_company": grading_company,
+            "grade": grade,
             "estimated_value": item.get("estimated_value"),
             "low_value": item.get("low_value"),
             "high_value": item.get("high_value"),

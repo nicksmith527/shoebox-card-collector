@@ -44,11 +44,15 @@ def identify_card_photo(uploaded_file) -> dict:
     if not key:
         raise RuntimeError("GEMINI_API_KEY is not configured.")
 
-    raw = uploaded_file.getvalue()
+    # For phone captures, Shoebox keeps the full-resolution original for
+    # collection storage but sends a smaller browser-optimized JPEG to Gemini.
+    raw = getattr(uploaded_file, "ai_bytes", None) or uploaded_file.getvalue()
     if not raw:
         raise RuntimeError("The image file is empty.")
 
-    mime = getattr(uploaded_file, "type", None) or "image/jpeg"
+    mime = "image/jpeg" if getattr(uploaded_file, "ai_bytes", None) else (
+        getattr(uploaded_file, "type", None) or "image/jpeg"
+    )
 
     prompt = """
 You are identifying a physical sports trading card from a photograph.

@@ -231,3 +231,39 @@ The AI result is a suggestion, not a definitive card identification.
 - Native `st.camera_input` does not currently expose a front/rear-facing camera
   parameter; forcing the iPhone rear camera would require a custom browser
   camera component using `facingMode: environment`.
+
+
+## v18 — Rear-camera-first, full-resolution photos
+
+This patch is based on the exact v17 GitHub package provided by the user.
+
+- Adds a custom browser camera component using `facingMode: environment`.
+- Rear/outward-facing camera is requested first on mobile.
+- Includes an explicit camera-flip button.
+- Requests the device's high-resolution camera stream and captures at the
+  actual video-frame dimensions with JPEG quality 0.96.
+- The original captured JPEG is passed to the existing Supabase Storage upload.
+- User photos are preferred over reference/web images in Set Builder.
+- Native Streamlit camera and file upload remain available as fallbacks.
+
+
+## v20 — Native iPhone photo capture + faster AI
+
+- Replaces video-frame snapshots with the phone's native camera capture flow.
+- `capture="environment"` requests the outward-facing camera.
+- Full-resolution original JPEG is retained for Supabase / collection display.
+- Browser generates a ~1400px JPEG copy only for Gemini recognition.
+- Gemini receives much less image data, improving recognition latency.
+- Original user photograph is never replaced by the AI-optimized copy.
+
+
+## v22 consolidated deployment
+
+This package consolidates the recent deployment fixes into one upload:
+
+- v19: Gemini photo identification model update and fallback/retry handling
+- v20: improved mobile photo quality and faster identification flow
+- v20: rear-camera component for phone scanning
+- v21: market valuation database fix so graded rows receive non-null condition labels such as `PSA 9`
+
+Upload the contents while preserving the `rear_camera_component` folder.

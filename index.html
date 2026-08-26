@@ -1,0 +1,185 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <style>
+    body {
+      margin:0;
+      font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+      background:#fff;
+      color:#101828;
+    }
+    .wrap { padding:4px; }
+    .take {
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      width:100%;
+      min-height:58px;
+      border-radius:14px;
+      background:#ff4b4b;
+      color:#fff;
+      font-size:18px;
+      font-weight:800;
+      cursor:pointer;
+      box-sizing:border-box;
+    }
+    input[type=file] { display:none; }
+    img {
+      width:100%;
+      max-height:62vh;
+      object-fit:contain;
+      border-radius:14px;
+      margin-top:10px;
+      background:#f2f4f7;
+      display:none;
+    }
+    .status {
+      font-size:13px;
+      color:#667085;
+      margin:8px 2px 0 2px;
+      line-height:1.4;
+    }
+    .retake {
+      display:none;
+      width:100%;
+      min-height:48px;
+      border:1px solid #d0d5dd;
+      background:#fff;
+      border-radius:12px;
+      font-size:16px;
+      font-weight:700;
+      margin-top:10px;
+    }
+    canvas { display:none; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <label class="take" for="cameraInput">📷 Take high-quality card photo</label>
+  <input
+    id="cameraInput"
+    type="file"
+    accept="image/*"
+    capture="environment"
+  />
+  <img id="preview" alt="Card preview" />
+  <button class="retake" id="retake" type="button">Retake photo</button>
+  <div class="status" id="status">
+    Opens your phone’s native rear camera. The full-resolution original is saved;
+    Shoebox makes a smaller copy only for AI recognition.
+  </div>
+  <canvas id="canvas"></canvas>
+</div>
+
+<script src="https://unpkg.com/streamlit-component-lib/dist/index.js"></script>
+<script>
+const input = document.getElementById("cameraInput");
+const preview = document.getElementById("preview");
+const statusEl = document.getElementById("status");
+const retake = document.getElementById("retake");
+const canvas = document.getElementById("canvas");
+
+function resizeFrame() {
+  Streamlit.setFrameHeight(document.documentElement.scrollHeight + 10);
+}
+
+function fileToDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
+}
+
+function imageFromDataURL(dataURL) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = dataURL;
+  });
+}
+
+async function makeAIDataURL(originalDataURL) {
+  const img = await imageFromDataURL(originalDataURL);
+
+  // Long edge around 1400px is plenty for card text/layout recognition,
+  // while dramatically reducing upload/token latency versus a 12-48MP photo.
+  const maxLongEdge = 1400;
+  const scale = Math.min(1, maxLongEdge / Math.max(img.naturalWidth, img.naturalHeight));
+  const w = Math.max(1, Math.round(img.naturalWidth * scale));
+  const h = Math.max(1, Math.round(img.naturalHeight * scale));
+
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d", { alpha:false });
+  ctx.drawImage(img, 0, 0, w, h);
+
+  return {
+    dataURL: canvas.toDataURL("image/jpeg", 0.84),
+    width: w,
+    height: h,
+    originalWidth: img.naturalWidth,
+    originalHeight: img.naturalHeight
+  };
+}
+
+input.addEventListener("change", async () => {
+  const file = input.files && input.files[0];
+  if (!file) return;
+
+  statusEl.textContent = "Preparing photo…";
+  resizeFrame();
+
+  try {
+    const originalDataURL = await fileToDataURL(file);
+    const ai = await makeAIDataURL(originalDataURL);
+
+    preview.src = originalDataURL;
+    preview.style.display = "block";
+    retake.style.display = "block";
+
+    const originalMB = (file.size / 1024 / 1024).toFixed(1);
+    statusEl.textContent =
+      `Original ${ai.originalWidth}×${ai.originalHeight} • ${originalMB} MB saved. ` +
+      `AI copy ${ai.width}×${ai.height}.`;
+
+    Streamlit.setComponentValue({
+      original_data_url: originalDataURL,
+      ai_data_url: ai.dataURL,
+      mime_type: file.type || "image/jpeg",
+      filename: file.name || "card_photo.jpg",
+      original_width: ai.originalWidth,
+      original_height: ai.originalHeight,
+      ai_width: ai.width,
+      ai_height: ai.height,
+      original_size: file.size
+    });
+
+    resizeFrame();
+  } catch (err) {
+    statusEl.textContent = "Could not prepare photo: " + err.message;
+    resizeFrame();
+  }
+});
+
+retake.addEventListener("click", () => {
+  input.value = "";
+  preview.src = "";
+  preview.style.display = "none";
+  retake.style.display = "none";
+  statusEl.textContent = "Tap the red button to retake the card photo.";
+  Streamlit.setComponentValue(null);
+  input.click();
+  resizeFrame();
+});
+
+Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, resizeFrame);
+Streamlit.setComponentReady();
+resizeFrame();
+</script>
+</body>
+</html>
