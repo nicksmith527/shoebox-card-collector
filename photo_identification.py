@@ -4,16 +4,19 @@ import base64
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 
 
-GEMINI_MODEL = os.getenv("GEMINI_CARD_MODEL", "gemini-2.5-flash")
-GEMINI_URL = (
-    "https://generativelanguage.googleapis.com/v1beta/models/"
-    + GEMINI_MODEL
-    + ":generateContent"
-)
+GEMINI_MODEL = os.getenv("GEMINI_CARD_MODEL", "gemini-3.6-flash")
+def _gemini_url(model: str) -> str:
+    return (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        + model
+        + ":generateContent"
+    )
+
 
 
 def _api_key():
@@ -86,27 +89,66 @@ Rules:
         },
     }
 
-    req = urllib.request.Request(
-        f"{GEMINI_URL}?key={key}",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "User-Agent": "Shoebox-Card-Collector/1.0",
-        },
-        method="POST",
-    )
+    models = [GEMINI_MODEL]
+    # Fallback target can be overridden later without another code change.
+    fallback = os.getenv("GEMINI_CARD_FALLBACK_MODEL", "gemini-3.7-flash").strip()
+    if fallback and fallback not in models:
+        models.append(fallback)
 
-    try:
-        with urllib.request.urlopen(req, timeout=45) as response:
-            result = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as error:
-        body = error.read().decode("utf-8", errors="replace")
+    last_error = None
+    result = None
+
+    for model in models:
+        for attempt in range(3):
+            req = urllib.request.Request(
+                f"{_gemini_url(model)}?key={key}",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "User-Agent": "Shoebox-Card-Collector/1.0",
+                },
+                method="POST",
+            )
+
+            try:
+                with urllib.request.urlopen(req, timeout=45) as response:
+                    result = json.loads(response.read().decode("utf-8"))
+                break
+
+            except urllib.error.HTTPError as error:
+                body = error.read().decode("utf-8", errors="replace")
+                last_error = RuntimeError(
+                    f"{model} returned HTTP {error.code}: {body[:350]}"
+                )
+
+                # Retry transient service errors on the same model.
+                if error.code in (429, 500, 502, 503, 504) and attempt < 2:
+                    time.sleep(1.0 * (2 ** attempt))
+                    continue
+
+                # A missing/retired model should immediately try fallback.
+                if error.code == 404:
+                    break
+
+                # Other hard failures should not hammer the endpoint.
+                break
+
+            except Exception as error:
+                last_error = error
+                if attempt < 2:
+                    time.sleep(1.0 * (2 ** attempt))
+                    continue
+                break
+
+        if result is not None:
+            break
+
+    if result is None:
         raise RuntimeError(
-            f"Gemini photo identification failed (HTTP {error.code}). {body[:500]}"
-        ) from error
-    except Exception as error:
-        raise RuntimeError(f"Gemini photo identification failed: {error}") from error
+            "AI identification is temporarily unavailable. "
+            f"Last provider error: {last_error}"
+        )
 
     candidates = result.get("candidates") or []
     if not candidates:
