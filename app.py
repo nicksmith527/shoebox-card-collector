@@ -5,6 +5,7 @@ from datetime import date, timedelta
 import pandas as pd
 import streamlit as st
 from market_values import estimate_card_values, test_market_access
+from photo_identification import identify_card_photo
 
 # External sports-card catalog key.
 # Streamlit Community Cloud users can set THE_CARD_API_KEY in app Secrets.
@@ -13,6 +14,13 @@ try:
         os.environ["THE_CARD_API_KEY"] = str(st.secrets["THE_CARD_API_KEY"])
 except Exception:
     pass
+
+try:
+    if not os.getenv("GEMINI_API_KEY") and "GEMINI_API_KEY" in st.secrets:
+        os.environ["GEMINI_API_KEY"] = str(st.secrets["GEMINI_API_KEY"])
+except Exception:
+    pass
+
 from external_catalog import (
     parse_card_query,
     search_external_card_catalog,
@@ -52,6 +60,27 @@ st.markdown("""
 [data-testid="stMetricValue"] {font-size: 1.6rem;}
 .card-ref {color:#A63A2B;font-weight:800;font-size:.85rem;}
 .small-muted {color:#69737D;font-size:.82rem;}
+@media (max-width: 700px) {
+  .block-container {padding: .65rem .7rem 4rem .7rem !important;}
+  h1 {font-size: 2rem !important; margin-bottom: .25rem !important;}
+  h2, h3 {margin-top: .6rem !important;}
+  [data-testid="stHorizontalBlock"] {gap: .45rem !important;}
+  [data-testid="stButton"] button {min-height: 3rem; font-weight: 700;}
+  [data-testid="stCameraInput"] button {min-height: 3.4rem; font-size: 1.05rem;}
+  [data-testid="stFileUploader"] section {padding: .75rem !important;}
+  [data-testid="stMetric"] {padding: .45rem .2rem !important;}
+}
+.scan-hero {
+  border:1px solid #D8D0C3;
+  border-radius:14px;
+  padding:14px;
+  background:#FFFDF8;
+  margin:0 0 12px 0;
+}
+.scan-confidence {
+  font-weight:800;
+  color:#102A43;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -588,158 +617,425 @@ elif nav == "My Collection":
         st.dataframe(df, hide_index=True, width="stretch")
 
 elif nav == "Add / Scan Card":
-    st.title("Smart Add")
-    st.caption("Photo first. Search the catalog second. Create a new catalog record only when the card is not already known.")
+    st.title("Add / Scan Card")
+    st.caption("Take a photo, confirm the match, and add the physical card to your collection.")
 
     if "recent_set_ids" not in st.session_state:
         st.session_state["recent_set_ids"] = []
+    if "scan_ai" not in st.session_state:
+        st.session_state["scan_ai"] = None
 
-    photo_tab, search_tab, manual_tab = st.tabs(["📷 Take / Upload Photo", "🔎 Search Card", "✍️ Manual Fallback"])
+    # ----------------------------
+    # PHOTO-FIRST MOBILE WORKFLOW
+    # ----------------------------
+    st.markdown(
+        '<div class="scan-hero"><b>📷 Quick Scan</b><br>'
+        '<span class="small-muted">Photograph the front of one card. '
+        'Keep the card straight and fill most of the frame.</span></div>',
+        unsafe_allow_html=True,
+    )
 
-    with photo_tab:
-        st.subheader("1. Add the card image")
-        c1, c2 = st.columns(2)
-        with c1:
-            camera = st.camera_input("Take a photo", key="smart_camera")
-        with c2:
-            upload = st.file_uploader("Upload a photo", type=["jpg","jpeg","png","webp"], key="smart_upload")
-        image = camera or upload
-        if image is not None:
-            st.success("Photo captured. Now identify the card below; the image will attach to the copy you add.")
-            st.image(image, width=320)
-        else:
-            st.info("You can still search and add without a photo. Photo recognition can be layered onto this same workflow later.")
+    camera = st.camera_input("Take card photo", key="mobile_camera")
 
-        st.subheader("2. Identify the card")
-        recent_sets = [s for s in sets if int(s["id"]) in st.session_state["recent_set_ids"]]
-        if recent_sets:
-            st.caption("Recent sets")
-            rcols = st.columns(min(4, len(recent_sets)))
-            for i,rs in enumerate(recent_sets[:4]):
-                if rcols[i].button(f"{rs['year']} {rs['manufacturer']} {rs['set_name']}", key=f"recent_{rs['id']}", width="stretch"):
-                    st.session_state["smart_set_id"] = int(rs["id"])
+    with st.expander("Upload an existing photo instead", expanded=False):
+        upload = st.file_uploader(
+            "Choose card image",
+            type=["jpg", "jpeg", "png", "webp"],
+            key="mobile_upload",
+        )
 
-        q1,q2,q3 = st.columns([1.2,1,1.6])
-        sport_options = ["All"] + sorted({str(x.get("sport") or "") for x in sets if x.get("sport")})
-        year_options = ["All"] + [str(y) for y in sorted({int(x["year"]) for x in sets if x.get("year") is not None}, reverse=True)]
-        sport = q1.selectbox("Sport", sport_options, key="smart_sport")
-        year = q2.selectbox("Year", year_options, key="smart_year")
-        query = q3.text_input("Player, card #, or keywords", placeholder="e.g. Clemens 181, Mattingly, #83")
+    image = camera or upload
 
-        filtered_sets = [s for s in sets if (sport == "All" or s.get("sport") == sport) and (year == "All" or int(s.get("year")) == int(year))]
-        set_choices = ["Any loaded set"] + [set_label(s) for s in filtered_sets]
-        default_index = 0
-        remembered = st.session_state.get("smart_set_id")
-        if remembered:
-            for idx,sr in enumerate(filtered_sets, start=1):
-                if int(sr["id"]) == int(remembered):
-                    default_index = idx
-                    break
-        chosen_set_label = st.selectbox("Set (optional but recommended)", set_choices, index=default_index, key="smart_set")
-        chosen_set = None if chosen_set_label == "Any loaded set" else filtered_sets[set_choices.index(chosen_set_label)-1]
+    if image is not None:
+        st.image(image, width=280)
 
-        matches = []
-        if query.strip() or chosen_set is not None:
-            matches = search_master_cards(
-                query=query.strip() or None,
-                sport=None if sport == "All" else sport,
-                year=None if year == "All" else int(year),
-                manufacturer=chosen_set.get("manufacturer") if chosen_set else None,
-                set_name=chosen_set.get("set_name") if chosen_set else None,
-                limit=50,
+        if st.button(
+            "✨ Identify this card",
+            type="primary",
+            width="stretch",
+            key="identify_card_photo",
+        ):
+            try:
+                with st.spinner("Reading the card…"):
+                    st.session_state["scan_ai"] = identify_card_photo(image)
+            except Exception as error:
+                st.error(str(error))
+
+    ai = st.session_state.get("scan_ai")
+
+    if ai:
+        confidence = float(ai.get("confidence") or 0)
+        confidence_text = f"{confidence:.0%}"
+
+        st.markdown("### Suggested identity")
+        a1, a2 = st.columns(2)
+        a1.metric("Player", ai.get("player_name") or "Uncertain")
+        a2.metric("Card #", ai.get("card_number") or "Uncertain")
+
+        b1, b2 = st.columns(2)
+        b1.metric("Year", ai.get("year") or "—")
+        b2.metric("Confidence", confidence_text)
+
+        identity_line = " • ".join(
+            str(v) for v in [
+                ai.get("manufacturer"),
+                ai.get("set_name"),
+                ai.get("variation"),
+            ] if v
+        )
+        if identity_line:
+            st.caption(identity_line)
+        if ai.get("notes"):
+            st.caption(f"AI note: {ai['notes']}")
+
+        # Find likely records already in Shoebox.
+        local_matches = []
+        player_query = str(ai.get("player_name") or "").strip()
+        card_num = str(ai.get("card_number") or "").strip()
+
+        try:
+            if player_query:
+                local_matches = search_master_cards(
+                    query=player_query,
+                    sport=ai.get("sport") or None,
+                    year=ai.get("year") or None,
+                    manufacturer=ai.get("manufacturer") or None,
+                    limit=100,
+                )
+            elif card_num:
+                local_matches = search_master_cards(
+                    query=card_num,
+                    sport=ai.get("sport") or None,
+                    year=ai.get("year") or None,
+                    manufacturer=ai.get("manufacturer") or None,
+                    limit=100,
+                )
+        except Exception:
+            local_matches = []
+
+        # Rank matches by exact card # and set/player similarity.
+        def _rank_match(m):
+            ms = m.get("master_sets") or {}
+            score = 0
+            if card_num and str(m.get("card_number") or "").casefold() == card_num.casefold():
+                score += 50
+            if player_query and str(m.get("player_name") or "").casefold() == player_query.casefold():
+                score += 40
+            if ai.get("year") and int(ms.get("year") or 0) == int(ai["year"]):
+                score += 20
+            if ai.get("manufacturer") and str(ms.get("manufacturer") or "").casefold() == str(ai["manufacturer"]).casefold():
+                score += 15
+            if ai.get("set_name") and str(ai["set_name"]).casefold() in str(ms.get("set_name") or "").casefold():
+                score += 15
+            return score
+
+        local_matches = sorted(local_matches, key=_rank_match, reverse=True)
+        likely = [m for m in local_matches if _rank_match(m) >= 35][:8]
+
+        if likely:
+            st.markdown("### Confirm match")
+            match_labels = []
+            for m in likely:
+                ms = m.get("master_sets") or {}
+                who = m.get("player_name") or m.get("card_title") or "Unknown"
+                match_labels.append(
+                    f"{ms.get('year')} {ms.get('manufacturer')} "
+                    f"{ms.get('set_name')} #{m.get('card_number')} — {who}"
+                )
+
+            selected_match_label = st.selectbox(
+                "Shoebox match",
+                match_labels,
+                key="scan_confirm_match",
+            )
+            match = likely[match_labels.index(selected_match_label)]
+
+            if match.get("reference_image_url"):
+                st.image(match["reference_image_url"], width=180)
+
+            c1, c2 = st.columns(2)
+            condition = c1.selectbox(
+                "Condition",
+                ["", "GOOD", "VG", "EX", "EX-MT", "NM", "NM-MT"],
+                key="scan_condition",
+            )
+            detected_grader = str(ai.get("grading_company") or "RAW").upper()
+            grader_options = ["RAW", "PSA", "SGC", "CGC", "BGS"]
+            grader_index = grader_options.index(detected_grader) if detected_grader in grader_options else 0
+            grading_company = c2.selectbox(
+                "Grading",
+                grader_options,
+                index=grader_index,
+                key="scan_grader",
+            )
+            grade_default = float(ai.get("grade") or 0)
+            grade = st.number_input(
+                "Grade",
+                min_value=0.0,
+                max_value=10.0,
+                step=0.5,
+                value=min(max(grade_default, 0.0), 10.0),
+                disabled=grading_company == "RAW",
+                key="scan_grade",
             )
 
-        if matches:
-            labels=[]
-            for m in matches:
-                ms=m.get("master_sets") or {{}}
-                who=m.get("player_name") or m.get("card_title") or "Unknown"
-                flags=[]
-                if m.get("rookie"): flags.append("RC")
-                if m.get("variation"): flags.append(str(m.get("variation")))
-                suffix=f" • {' • '.join(flags)}" if flags else ""
-                labels.append(f"{ms.get('year')} {ms.get('manufacturer')} {ms.get('set_name')} #{m.get('card_number')} — {who}{suffix}")
-            selection = st.selectbox("Best catalog match", labels, key="smart_match")
-            match = matches[labels.index(selection)]
-            ms=match.get("master_sets") or {{}}
-            if match.get("reference_image_url"):
-                st.image(match["reference_image_url"], width=220)
-            st.caption(f"Catalog ID {match['id']} • {ms.get('sport')} • {ms.get('year')} {ms.get('manufacturer')} {ms.get('set_name')}")
-
-            d1,d2,d3 = st.columns(3)
-            condition = d1.selectbox("Condition", ["", "GOOD", "VG", "EX", "EX-MT", "NM", "NM-MT"], key="smart_condition")
-            grading_company = d2.selectbox("Grading", ["RAW", "PSA", "SGC", "CGC", "BGS"], key="smart_grader")
-            grade = d3.number_input("Grade", min_value=0.0, max_value=10.0, step=0.5, value=0.0, disabled=grading_company == "RAW", key="smart_grade")
-
-            if st.button("Add matched card", type="primary", width="stretch", key="smart_add_match"):
-                result = add_copy(int(match["id"]), condition_label=condition or None, grading_company=grading_company, grade=(grade if grading_company != "RAW" and grade > 0 else None))
-                copy_id = int(result[0]["id"])
-                if image is not None:
-                    try:
-                        upload_copy_image(copy_id, image, "front")
-                    except Exception as exc:
-                        st.warning(f"Card saved, but image upload failed: {exc}")
-                sid=int(match["master_set_id"])
-                st.session_state["recent_set_ids"] = [sid] + [x for x in st.session_state["recent_set_ids"] if x != sid]
-                st.session_state["recent_set_ids"] = st.session_state["recent_set_ids"][:4]
-                st.success("Card added.")
-                st.rerun()
-        elif query.strip() or chosen_set is not None:
-            st.warning("No catalog match found. Use the Manual Fallback tab to create the card once, then future copies can use normal search.")
-
-    with search_tab:
-        st.subheader("Fast catalog search")
-        search_text = st.text_input("Search across loaded catalog", placeholder="1985 Topps Clemens, Sandberg 83, O.J. Simpson 90", key="global_card_search")
-        sport_filter = st.selectbox("Sport filter", ["All"] + sorted({str(x.get("sport") or "") for x in sets if x.get("sport")}), key="global_sport")
-        results = search_master_cards(query=search_text or None, sport=None if sport_filter == "All" else sport_filter, limit=100) if search_text.strip() else []
-        if search_text.strip() and not results:
-            st.info("No exact catalog records found yet.")
-        for r in results[:25]:
-            ms=r.get("master_sets") or {{}}
-            with st.container(border=True):
-                a,b,c = st.columns([1,4,1])
-                if r.get("reference_image_url"):
-                    a.image(r["reference_image_url"], width=110)
-                else:
-                    a.caption("📷")
-                b.markdown(f"**{r.get('player_name') or r.get('card_title') or 'Unknown'}**")
-                b.caption(f"{ms.get('year')} {ms.get('manufacturer')} {ms.get('set_name')} • #{r.get('card_number')}{' • RC' if r.get('rookie') else ''}")
-                if c.button("+ Add", key=f"search_add_{r['id']}", width="stretch"):
-                    add_copy(int(r["id"]))
-                    sid=int(r["master_set_id"])
-                    st.session_state["recent_set_ids"] = [sid] + [x for x in st.session_state["recent_set_ids"] if x != sid]
+            if st.button(
+                "✅ Confirm & add to collection",
+                type="primary",
+                width="stretch",
+                key="scan_add_confirmed",
+            ):
+                try:
+                    result = add_copy(
+                        int(match["id"]),
+                        condition_label=condition or None,
+                        grading_company=grading_company,
+                        grade=(grade if grading_company != "RAW" and grade > 0 else None),
+                    )
+                    copy_id = int(result[0]["id"])
+                    if image is not None:
+                        try:
+                            upload_copy_image(copy_id, image, "front")
+                        except Exception as exc:
+                            st.warning(f"Card added, but photo upload failed: {exc}")
+                    sid = int(match["master_set_id"])
+                    st.session_state["recent_set_ids"] = [
+                        sid
+                    ] + [
+                        x for x in st.session_state["recent_set_ids"] if x != sid
+                    ]
                     st.session_state["recent_set_ids"] = st.session_state["recent_set_ids"][:4]
-                    st.success("Added.")
+                    st.session_state["scan_ai"] = None
+                    st.success("Card added to your collection.")
                     st.rerun()
+                except Exception as error:
+                    st.error(f"Could not add card: {error}")
 
-    with manual_tab:
-        st.subheader("Create a missing catalog card")
-        st.caption("Use this only when Shoebox cannot find the card in the catalog. Once created, it becomes searchable for future copies.")
-        selected_label = st.selectbox("Set", [set_label(s) for s in sets], key="manual_set")
-        selected_set = sets[[set_label(s) for s in sets].index(selected_label)]
-        m1,m2 = st.columns(2)
-        card_number = m1.text_input("Card number", key="manual_num")
-        player_name = m2.text_input("Player / card title", key="manual_player")
-        variation = st.text_input("Variation / parallel (optional)", key="manual_var")
-        manual_image = st.file_uploader("Optional front image", type=["jpg","jpeg","png","webp"], key="manual_image")
-        if st.button("Create catalog card + add copy", type="primary", key="manual_create"):
-            if not card_number.strip() or not player_name.strip():
-                st.error("Card number and player/title are required.")
-            else:
-                created = add_manual_master_card(selected_set["id"], card_number, player_name, variation=variation)
-                mid = int(created[0]["id"])
-                result = add_copy(mid)
-                copy_id = int(result[0]["id"])
-                if manual_image is not None:
+        else:
+            st.warning(
+                "No confident local catalog match. Review the AI fields below before creating it."
+            )
+
+            # Editable confirmation form. This also handles completely unloaded sets.
+            with st.form("create_from_scan_form"):
+                f1, f2 = st.columns(2)
+                scan_year = f1.number_input(
+                    "Year",
+                    min_value=1800,
+                    max_value=date.today().year + 1,
+                    value=int(ai.get("year") or date.today().year),
+                )
+                scan_sport = f2.text_input("Sport", value=str(ai.get("sport") or "Baseball"))
+
+                f3, f4 = st.columns(2)
+                scan_manufacturer = f3.text_input(
+                    "Manufacturer",
+                    value=str(ai.get("manufacturer") or ""),
+                )
+                scan_set = f4.text_input(
+                    "Set",
+                    value=str(ai.get("set_name") or ""),
+                )
+
+                f5, f6 = st.columns(2)
+                scan_player = f5.text_input(
+                    "Player / title",
+                    value=str(ai.get("player_name") or ""),
+                )
+                scan_number = f6.text_input(
+                    "Card number",
+                    value=str(ai.get("card_number") or ""),
+                )
+
+                scan_variation = st.text_input(
+                    "Variation / parallel",
+                    value=str(ai.get("variation") or ""),
+                )
+
+                confirm_new = st.checkbox(
+                    "I reviewed these fields and they describe the photographed card."
+                )
+
+                create_submit = st.form_submit_button(
+                    "Create catalog record + add card",
+                    type="primary",
+                    width="stretch",
+                )
+
+            if create_submit:
+                if not confirm_new:
+                    st.warning("Confirm that you reviewed the fields first.")
+                elif not scan_player.strip() or not scan_number.strip() or not scan_set.strip():
+                    st.error("Player/title, card number, and set are required.")
+                else:
+                    candidate = {
+                        "sport": scan_sport.strip() or "Unknown",
+                        "year": int(scan_year),
+                        "manufacturer": scan_manufacturer.strip() or "Unknown",
+                        "set_name": scan_set.strip(),
+                        "card_number": scan_number.strip().lstrip("#"),
+                        "player_name": scan_player.strip(),
+                        "rookie": bool(ai.get("rookie")) if ai.get("rookie") is not None else False,
+                        "variation": scan_variation.strip() or None,
+                        "image_url": None,
+                        "source_url": None,
+                    }
                     try:
-                        upload_copy_image(copy_id, manual_image, "front")
-                    except Exception as exc:
-                        st.warning(f"Card saved, but image upload failed: {exc}")
-                sid=int(selected_set["id"])
-                st.session_state["recent_set_ids"] = [sid] + [x for x in st.session_state["recent_set_ids"] if x != sid]
-                st.session_state["recent_set_ids"] = st.session_state["recent_set_ids"][:4]
-                st.success("Catalog card created and first copy added.")
-                st.rerun()
+                        created = create_master_card_from_external(candidate)
+                        result = add_copy(int(created["id"]))
+                        copy_id = int(result[0]["id"])
+                        if image is not None:
+                            try:
+                                upload_copy_image(copy_id, image, "front")
+                            except Exception as exc:
+                                st.warning(f"Card added, but photo upload failed: {exc}")
+                        st.session_state["scan_ai"] = None
+                        st.success("New card learned and added to your collection.")
+                        st.rerun()
+                    except Exception as error:
+                        st.error(f"Could not create card: {error}")
+
+        if st.button("🔄 Clear scan and start over", width="stretch", key="clear_scan"):
+            st.session_state["scan_ai"] = None
+            st.rerun()
+
+    # ----------------------------
+    # SMART MANUAL SEARCH
+    # ----------------------------
+    st.divider()
+    with st.expander("🔎 Search / add manually", expanded=(image is None)):
+        st.caption(
+            "Start typing a player, card number, year, or set. "
+            "Use this when you don't want to take a photo."
+        )
+
+        recent_sets = [
+            s for s in sets
+            if int(s["id"]) in st.session_state["recent_set_ids"]
+        ]
+        if recent_sets:
+            st.caption("Recent sets")
+            recent_choice = st.selectbox(
+                "Jump to recent set",
+                ["—"] + [set_label(s) for s in recent_sets[:4]],
+                key="manual_recent_set",
+            )
+        else:
+            recent_choice = "—"
+
+        m1, m2 = st.columns(2)
+        manual_year = m1.selectbox(
+            "Year",
+            ["All"] + [
+                str(y)
+                for y in sorted(
+                    {int(s["year"]) for s in sets if s.get("year") is not None},
+                    reverse=True,
+                )
+            ],
+            key="manual_smart_year",
+        )
+        manual_sport = m2.selectbox(
+            "Sport",
+            ["All"] + sorted(
+                {str(s.get("sport")) for s in sets if s.get("sport")}
+            ),
+            key="manual_smart_sport",
+        )
+
+        manual_query = st.text_input(
+            "Player, card #, or keywords",
+            placeholder="e.g. Jeter 98, Griffey 1, Clemens 181",
+            key="manual_smart_query",
+        )
+
+        manual_matches = []
+        if manual_query.strip():
+            try:
+                manual_matches = search_master_cards(
+                    query=manual_query.strip(),
+                    sport=None if manual_sport == "All" else manual_sport,
+                    year=None if manual_year == "All" else int(manual_year),
+                    limit=50,
+                )
+            except Exception as error:
+                st.warning(f"Search temporarily unavailable: {error}")
+
+        if manual_matches:
+            manual_labels = []
+            for m in manual_matches:
+                ms = m.get("master_sets") or {}
+                manual_labels.append(
+                    f"{ms.get('year')} {ms.get('manufacturer')} "
+                    f"{ms.get('set_name')} #{m.get('card_number')} — "
+                    f"{m.get('player_name') or m.get('card_title') or 'Unknown'}"
+                )
+            manual_pick_label = st.selectbox(
+                "Matching card",
+                manual_labels,
+                key="manual_smart_match",
+            )
+            manual_pick = manual_matches[manual_labels.index(manual_pick_label)]
+
+            if st.button(
+                "➕ Add selected card",
+                type="primary",
+                width="stretch",
+                key="manual_smart_add",
+            ):
+                try:
+                    add_copy(int(manual_pick["id"]))
+                    sid = int(manual_pick["master_set_id"])
+                    st.session_state["recent_set_ids"] = [
+                        sid
+                    ] + [
+                        x for x in st.session_state["recent_set_ids"] if x != sid
+                    ]
+                    st.session_state["recent_set_ids"] = st.session_state["recent_set_ids"][:4]
+                    st.success("Card added.")
+                    st.rerun()
+                except Exception as error:
+                    st.error(f"Could not add card: {error}")
+
+        elif manual_query.strip():
+            st.info(
+                "No loaded-catalog match. Take a photo above and let Shoebox "
+                "identify/create the card, or use the custom entry below."
+            )
+
+        with st.expander("Create a custom card manually", expanded=False):
+            selected_label = st.selectbox(
+                "Existing set",
+                [set_label(s) for s in sets],
+                key="custom_manual_set",
+            )
+            selected_set = sets[
+                [set_label(s) for s in sets].index(selected_label)
+            ]
+            cm1, cm2 = st.columns(2)
+            custom_number = cm1.text_input("Card number", key="custom_manual_num")
+            custom_player = cm2.text_input("Player / title", key="custom_manual_player")
+            custom_variation = st.text_input(
+                "Variation / parallel",
+                key="custom_manual_var",
+            )
+            if st.button(
+                "Create + add custom card",
+                width="stretch",
+                key="custom_manual_create",
+            ):
+                if not custom_number.strip() or not custom_player.strip():
+                    st.error("Card number and player/title are required.")
+                else:
+                    created = add_manual_master_card(
+                        selected_set["id"],
+                        custom_number,
+                        custom_player,
+                        variation=custom_variation,
+                    )
+                    add_copy(int(created[0]["id"]))
+                    st.success("Card created and added.")
+                    st.rerun()
 
 elif nav == "Master Export":
     st.title("Master Export")

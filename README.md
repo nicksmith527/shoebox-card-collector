@@ -200,3 +200,22 @@ ENABLE_PAID_CARD_CATALOG = "true"
 ```
 
 Known sets should be maintained in Shoebox's own Supabase master catalog.
+
+
+## v15 — Mobile Smart Scan
+
+The Add / Scan Card page is now phone-first:
+
+- Large camera-first workflow on HTTPS/Streamlit Cloud
+- Gemini visual identification from the card photo
+- Extracts year, sport, manufacturer, set, player, card number, variation,
+  rookie flag, grader and grade when visible
+- Searches Shoebox's local master catalog first
+- Requires user confirmation before adding anything
+- If the card/set is not known locally, the extracted fields are editable and
+  Shoebox can create the set/card once, then add the photographed physical copy
+- Uploaded card photo is stored in Supabase Storage
+- Smart manual search remains available as the no-photo fallback
+- Mobile CSS improves tap targets and spacing
+
+The AI result is a suggestion, not a definitive card identification.
